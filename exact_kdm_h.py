@@ -9,6 +9,7 @@ from scipy.sparse import csc_matrix
 
 # Qiskit imports
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
+from qiskit_nature.drivers import UnitsType
 from qiskit_nature.converters.second_quantization import QubitConverter
 from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper
 from qiskit_nature.circuit.library.initial_states import HartreeFock
@@ -27,25 +28,25 @@ def get_scipy_csc_from_op(Hop, factor):
 def apply_time_evolution_op(statevector, Hcsc, dt, nstates):
     return expm_multiply(Hcsc, statevector, start=0.0, stop=dt*nstates, num=nstates, endpoint=False)
     
-xyz = '''H 0.0 0.0 0.0
-         H 1.0 0.0 0.0
-         H 2.5 0.0 0.0
-         H 3.5 0.0 0.0
-         H 5.0 0.0 0.0
-         H 6.0 0.0 0.0'''
 #xyz = '''H 0.0 0.0 0.0
-#         H 1.5 0.0 0.0
-#         H 3.0 0.0 0.0
-#         H 4.5 0.0 0.0
-#         H 6.0 0.0 0.0
-#         H 7.5 0.0 0.0'''
+#         H 1.0 0.0 0.0
+#         H 2.5 0.0 0.0
+#         H 3.5 0.0 0.0
+#         H 5.0 0.0 0.0
+#         H 6.0 0.0 0.0'''
+xyz = '''H 0.0 0.0 0.0
+         H 1.5 0.0 0.0
+         H 3.0 0.0 0.0
+         H 4.5 0.0 0.0
+         H 6.0 0.0 0.0
+         H 7.5 0.0 0.0'''
 #xyz = '''H 0.0 0.0 0.0
 #         H  0.0 0.0 1.5
 #         H  0.0 0.0 3.0
 #         H  0.0 0.0 4.5'''
 
 # First, perform an RHF calculation using the qiskit_nature PySCF driver
-driver = PySCFDriver(atom=xyz, charge=0, spin=0, method=MethodType.RHF)
+driver = PySCFDriver(atom=xyz, unit=UnitsType.BOHR, charge=0, spin=0, method=MethodType.RHF)
 driver_result = driver.run()
 electronic_en = driver_result.get_property(ElectronicEnergy)
 nuc_rep_en = electronic_en.nuclear_repulsion_energy
