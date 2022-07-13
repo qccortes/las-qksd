@@ -25,21 +25,24 @@ def get_scipy_csc_from_op(Hop, factor):
     return csc_matrix(factor*Hop, dtype=complex)
 
 def apply_time_evolution_op(statevector, Hcsc, dt, nstates):
-
-    qc_vec = np.array(statevector, dtype=complex)
-
-    return expm_multiply(Hcsc, qc_vec, start=0.0, stop=dt*nstates, num=nstates, endpoint=True)
+    return expm_multiply(Hcsc, statevector, start=0.0, stop=dt*nstates, num=nstates, endpoint=False)
     
+xyz = '''H 0.0 0.0 0.0
+         H 1.0 0.0 0.0
+         H 2.5 0.0 0.0
+         H 3.5 0.0 0.0
+         H 5.0 0.0 0.0
+         H 6.0 0.0 0.0'''
 #xyz = '''H 0.0 0.0 0.0
 #         H 1.5 0.0 0.0
 #         H 3.0 0.0 0.0
 #         H 4.5 0.0 0.0
 #         H 6.0 0.0 0.0
 #         H 7.5 0.0 0.0'''
-xyz = '''H 0.0 0.0 0.0
-         H  0.0 0.0 1.5
-         H  0.0 0.0 3.0
-         H  0.0 0.0 4.5'''
+#xyz = '''H 0.0 0.0 0.0
+#         H  0.0 0.0 1.5
+#         H  0.0 0.0 3.0
+#         H  0.0 0.0 4.5'''
 
 # First, perform an RHF calculation using the qiskit_nature PySCF driver
 driver = PySCFDriver(atom=xyz, charge=0, spin=0, method=MethodType.RHF)
@@ -59,7 +62,7 @@ second_q_ops = driver_result.second_q_ops()
 qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
 qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
 hamiltonian = qubit_ops[0]
-print(hamiltonian)
+#print(hamiltonian)
 
 # Numpy solver to estimate error
 np_solver = NumPyEigensolver(k=1)
@@ -69,16 +72,15 @@ print("NumPy result: ", np_en+nuc_rep_en)
 #numpy_wfn = ed_result.eigenstates
 
 # Set up the number of timesteps and step size
-time_steps=4
+time_steps=6
 tau=0.1
 
 # Initialize F, S matrices
 F_mat = np.zeros((time_steps, time_steps), dtype=complex)
 S_mat = np.zeros((time_steps, time_steps), dtype=complex)
-#np.fill_diagonal(S_mat, 1.0)
 
 # Create a unitary by exponentiating the Hamiltonian
-# And trotterizing onto the circuit
+# Using the scipy sparse matrix form
 ham_mat = hamiltonian.to_matrix()
 Hsp = get_scipy_csc_from_op(ham_mat, -1.0j)
 
@@ -101,43 +103,36 @@ init_statevector[int(bitstring, 2)] = 1
 print(np.nonzero(init_statevector))
 '''
 
-omega_list = []
-Homega_list = []
-
+# U |\phi_0>
 statevector = apply_time_evolution_op(init_statevector, Hsp, tau, time_steps)
+omega_list = [np.asarray(state, dtype=complex) for state in statevector]
+
+# V U |\phi_0>
+Homega_list = [np.dot(ham_mat, omega) for omega in omega_list]
 
 for m in range(time_steps):
-    # U |\phi_0>
-    omega_list.append(np.asarray(statevector[m], dtype=complex))
-    
     # Filling the S matrix
-    for n in range(len(omega_list)):
-        # < \phi_0 | U | \phi_0 >
+    for n in range(m+1):
+        # < \phi_0 | U_m^+ U_n | \phi_0 >
         Smat_el = np.vdot(omega_list[m], omega_list[n])
 
         print("S_{}_{} = {}".format(m, n, Smat_el))
         S_mat[m][n] = Smat_el
         S_mat[n][m] = np.conj(Smat_el)
 
-    # V U |\phi_0>
-    h_unitary = hamiltonian.to_matrix()
-    h_statevector = np.dot(h_unitary, omega_list[m])
-    Homega_list.append(np.asarray(h_statevector, dtype=complex))
-
     # Filling the F matrix
-    # < \phi_0 | U^+ V U | \phi_0 >
-    for n in range(len(omega_list)):
+    # < \phi_0 | U_m^+ V U_n | \phi_0 >
+    for n in range(m+1):
         Fmat_el = np.vdot(omega_list[m], Homega_list[n])
         print("F_{}_{} = {}".format(m, n, Fmat_el))
         F_mat[m][n] = Fmat_el
         F_mat[n][m] = np.conj(Fmat_el)
-print(omega_list)
 print(S_mat)
 
 # Using the generalized Schur decomposition of F, S
 # to obtain the eigvals via scipy.linalg.ordqz (ordered QZ)
-#AA, BB, alpha, beta, Q, Z = LA.ordqz(F_mat, S_mat, sort='lhp')
-AA, BB, Q, Z = LA.qz(F_mat, S_mat)
+AA, BB, alpha, beta, Q, Z = LA.ordqz(F_mat, S_mat, sort='lhp')
+#AA, BB, Q, Z = LA.qz(F_mat, S_mat)
 
 alpha = np.diag(AA)
 beta = np.diag(BB)
