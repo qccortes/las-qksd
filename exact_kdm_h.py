@@ -22,33 +22,28 @@ from qiskit import Aer, transpile, execute
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit.utils import QuantumInstance
 
-def get_scipy_csc_from_op(Hop, factor):
-    return csc_matrix(factor*Hop, dtype=complex)
+def get_scipy_csc_from_op(Hop):
+    return csc_matrix(Hop, dtype=complex)
 
 def apply_time_evolution_op(statevector, Hcsc, dt, nstates):
-    return expm_multiply(Hcsc, statevector, start=0.0, stop=dt*nstates, num=nstates, endpoint=False)
+    return expm_multiply(-1j*Hcsc*dt, statevector, start=0.0, stop=nstates-1, num=nstates)
     
-#xyz = '''H 0.0 0.0 0.0
-#         H 1.0 0.0 0.0
-#         H 2.5 0.0 0.0
-#         H 3.5 0.0 0.0
-#         H 5.0 0.0 0.0
-#         H 6.0 0.0 0.0'''
 xyz = '''H 0.0 0.0 0.0
-         H 1.5 0.0 0.0
-         H 3.0 0.0 0.0
-         H 4.5 0.0 0.0
-         H 6.0 0.0 0.0
-         H 7.5 0.0 0.0'''
+         H  0.0 0.0 0.5
+         H  0.0 0.0 1.5
+         H  0.0 0.0 2.0'''
 #xyz = '''H 0.0 0.0 0.0
-#         H  0.0 0.0 1.5
-#         H  0.0 0.0 3.0
-#         H  0.0 0.0 4.5'''
+#         H 0.0 0.0 0.5
+#         H 0.0 0.0 1.0
+#         H 0.0 0.0 1.5'''
 
 # First, perform an RHF calculation using the qiskit_nature PySCF driver
-driver = PySCFDriver(atom=xyz, unit=UnitsType.BOHR, charge=0, spin=0, method=MethodType.RHF)
+#driver = PySCFDriver(atom=xyz, unit=UnitsType.BOHR, basis='sto-3g', charge=0, spin=0, method=MethodType.RHF)
+driver = PySCFDriver(atom=xyz, basis='sto-3g', charge=0, spin=0, method=MethodType.RHF)
 driver_result = driver.run()
 electronic_en = driver_result.get_property(ElectronicEnergy)
+hf_en = electronic_en.reference_energy
+print("HF energy: ",hf_en)
 nuc_rep_en = electronic_en.nuclear_repulsion_energy
 
 # Save number of orbitals, alpha and beta electrons from driver result
@@ -73,17 +68,14 @@ print("NumPy result: ", np_en+nuc_rep_en)
 #numpy_wfn = ed_result.eigenstates
 
 # Set up the number of timesteps and step size
-time_steps=6
+time_steps=15
 tau=0.1
-
-# Initialize F, S matrices
-F_mat = np.zeros((time_steps, time_steps), dtype=complex)
-S_mat = np.zeros((time_steps, time_steps), dtype=complex)
 
 # Create a unitary by exponentiating the Hamiltonian
 # Using the scipy sparse matrix form
 ham_mat = hamiltonian.to_matrix()
-Hsp = get_scipy_csc_from_op(ham_mat, -1.0j)
+Hsp = get_scipy_csc_from_op(ham_mat)
+#print("Hsp: \n",Hsp)
 
 # Create a Hartree-Fock state
 init_state = HartreeFock(n_so, (n_alpha, n_beta), qubit_converter)
@@ -111,13 +103,17 @@ omega_list = [np.asarray(state, dtype=complex) for state in statevector]
 # V U |\phi_0>
 Homega_list = [np.dot(ham_mat, omega) for omega in omega_list]
 
+# Initialize F, S matrices
+F_mat = np.zeros((time_steps, time_steps), dtype=complex)
+S_mat = np.zeros((time_steps, time_steps), dtype=complex)
+
 for m in range(time_steps):
     # Filling the S matrix
     for n in range(m+1):
         # < \phi_0 | U_m^+ U_n | \phi_0 >
         Smat_el = np.vdot(omega_list[m], omega_list[n])
 
-        print("S_{}_{} = {}".format(m, n, Smat_el))
+        #print("S_{}_{} = {}".format(m, n, Smat_el))
         S_mat[m][n] = Smat_el
         S_mat[n][m] = np.conj(Smat_el)
 
@@ -125,22 +121,41 @@ for m in range(time_steps):
     # < \phi_0 | U_m^+ V U_n | \phi_0 >
     for n in range(m+1):
         Fmat_el = np.vdot(omega_list[m], Homega_list[n])
-        print("F_{}_{} = {}".format(m, n, Fmat_el))
+        #print("F_{}_{} = {}".format(m, n, Fmat_el))
         F_mat[m][n] = Fmat_el
         F_mat[n][m] = np.conj(Fmat_el)
-print(S_mat)
 
-# Using the generalized Schur decomposition of F, S
-# to obtain the eigvals via scipy.linalg.ordqz (ordered QZ)
-AA, BB, alpha, beta, Q, Z = LA.ordqz(F_mat, S_mat, sort='lhp')
-#AA, BB, Q, Z = LA.qz(F_mat, S_mat)
+    #eigvals, eigvecs = LA.eig(F_mat[:m+1,:m+1], S_mat[:m+1,:m+1])
+    
+    # Using an SVD to condition the F matrix
+    # Before doing the eigendecomposition
+    Stol=1e-12
+    U, s, Vh = LA.svd(S_mat[:m+1, :m+1])
 
-alpha = np.diag(AA)
-beta = np.diag(BB)
-print("Alpha: ",alpha)
-print("Beta: ",beta)
-eigvals = alpha/beta
-print("eigvals = ", np.sort(eigvals))
-print("QKSD energy = ", eigvals[0]+nuc_rep_en)
+    #print(np.allclose(U, Vh.T.conj()))
 
-print("Error for timesteps={}: {}".format(time_steps, eigvals[0]-np_en))
+    Dtemp = 1/np.sqrt(s)
+    Dtemp[Dtemp**2 > 1/Stol] = 0
+
+    Xp = U[0:len(s),0:len(Dtemp)]*Dtemp
+    Fp = Xp.T.conjugate() @ F_mat[:m+1,:m+1] @ Xp
+
+    # Eigenvalues of the conditioned matrix
+    eigvals, eigvecs = LA.eig(Fp)
+
+    '''
+    # Using the generalized Schur decomposition of F, S
+    # to obtain the eigvals via scipy.linalg.ordqz (ordered QZ)
+    AA, BB, alpha, beta, Q, Z = LA.ordqz(F_mat[:m+1, :m+1], S_mat[:m+1, :m+1], sort='lhp')
+    #AA, BB, Q, Z = LA.qz(F_mat, S_mat)
+
+    #alpha = np.diag(AA)
+    #beta = np.diag(BB)
+    #print("Alpha: ",alpha)
+    #print("Beta: ",beta)
+    eigvals = alpha/beta
+    '''
+    #print("eigvals = ", np.sort(eigvals))
+    print("QKSD energy = ", eigvals[0]+nuc_rep_en)
+
+    #print("Error for timesteps={}: {}".format(m+1, eigvals[0]-np_en))

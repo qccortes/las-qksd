@@ -8,11 +8,12 @@ from scipy.sparse.linalg import expm_multiply
 from scipy.sparse import csc_matrix
 
 # Qiskit imports
+from qiskit_nature.properties.second_quantization.electronic.bases import ElectronicBasis
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
 from qiskit_nature.converters.second_quantization import QubitConverter
 from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper
 from qiskit_nature.circuit.library.initial_states import HartreeFock
-from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy
+from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy, ElectronicStructureDriverResult
 from qiskit.algorithms import NumPyEigensolver
 from qiskit.opflow import PauliTrotterEvolution, MatrixEvolution
 from qiskit.opflow.state_fns import CircuitStateFn, StateFn
@@ -22,16 +23,16 @@ from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit.utils import QuantumInstance
 
 # PySCF imports
-from pyscf import gto, scf
+from pyscf import gto, scf, mcscf, ao2mo
 
 # MRH imports
 from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF
 
-def get_scipy_csc_from_op(Hop, factor):
-    return csc_matrix(factor*Hop, dtype=complex)
+def get_scipy_csc_from_op(Hop):
+    return csc_matrix(Hop, dtype=complex)
 
 def apply_time_evolution_op(statevector, Hcsc, dt, nstates):
-    return expm_multiply(Hcsc, statevector, start=0.0, stop=dt*nstates, num=nstates, endpoint=False)
+    return expm_multiply(-1j*Hcsc*dt, statevector, start=0.0, stop=nstates-1, num=nstates)
     
 def get_so_ci_vec(ci_vec, nsporbs,nelec):
     lookup = {}
@@ -53,31 +54,61 @@ def get_so_ci_vec(ci_vec, nsporbs,nelec):
     return so_ci_vec
 
 
-xyz = '''H 0.0 0.0 0.0
-         H 1.0 0.0 0.0
-         H 2.5 0.0 0.0
-         H 3.5 0.0 0.0
-         H 5.0 0.0 0.0
-         H 6.0 0.0 0.0'''
 #xyz = '''H 0.0 0.0 0.0
-#         H  0.0 0.0 1.5
-#         H  0.0 0.0 3.0
-#         H  0.0 0.0 4.5'''
+#         H 1.0 0.0 0.0
+#         H 2.5 0.0 0.0
+#         H 3.5 0.0 0.0
+#         H 5.0 0.0 0.0
+#         H 6.0 0.0 0.0'''
+xyz = '''H 0.0 0.0 0.0
+         H  0.0 0.0 0.5
+         H  0.0 0.0 1.5
+         H  0.0 0.0 2.0'''
 
-# First, perform an RHF calculation using the qiskit_nature PySCF driver
-driver = PySCFDriver(atom=xyz, charge=0, spin=0, method=MethodType.RHF)
-driver_result = driver.run()
-electronic_en = driver_result.get_property(ElectronicEnergy)
-nuc_rep_en = electronic_en.nuclear_repulsion_energy
+# Create a LAS wave function and initialize
+# PySCF RHF for LAS
+mol = gto.M (atom = xyz, basis = 'sto-3g', output='h4_sto3g.log',
+             symmetry=False)
+
+# Do RHF
+mf = scf.RHF(mol).run()
+las = LASSCF(mf, (2,2),(2,2), spin_sub=(1,1))
+frag_atom_list = ((0,1),(2,3))
+loc_mo_coeff = las.localize_init_guess(frag_atom_list, mf.mo_coeff)
+las.kernel(loc_mo_coeff)
+loc_mo_coeff = las.mo_coeff
+print("LASSCF energy: ", las.e_tot)
+nuc_rep_en = las.energy_nuc()
+
+mc = mcscf.CASCI(mf,4,4)
+h1, e_core = mc.h1e_for_cas(mo_coeff=loc_mo_coeff)
+h2 = ao2mo.restore(1, mc.get_h2eff(loc_mo_coeff), mc.ncas)
 
 # Save number of orbitals, alpha and beta electrons from driver result
-part_num = driver_result.get_property(ParticleNumber)
-n_so = part_num.num_spin_orbitals
-n_alpha = part_num.num_alpha
-n_beta = part_num.num_beta
+n_so = mol.nao_nr() * 2
+n_alpha = las.nelecas[0]
+n_beta = las.nelecas[1]
 
 # Extract and convert the 1 and 2e integrals
 # To obtain the qubit Hamiltonian
+
+# Hacking together an ElectronicStructureDriverResult to create second_q_ops
+# Lines below stolen from qiskit's FCIDump driver and modified
+particle_number = ParticleNumber(
+    num_spin_orbitals=n_so,
+    num_particles=(n_alpha, n_beta),
+)
+
+# Assuming an RHF reference for now, so h1_b, h2_ab, h2_bb are created using
+# the corresponding spots from h1_frag and just the aa term from h2_frag
+electronic_energy = ElectronicEnergy.from_raw_integrals(
+        # Using MO basis here for simplified conversion
+        ElectronicBasis.MO, h1, h2)
+
+driver_result = ElectronicStructureDriverResult()
+driver_result.add_property(electronic_energy)
+driver_result.add_property(particle_number)
+
 second_q_ops = driver_result.second_q_ops()
 qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
 qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
@@ -92,7 +123,7 @@ print("NumPy result: ", np_en+nuc_rep_en)
 #numpy_wfn = ed_result.eigenstates
 
 # Set up the number of timesteps and step size
-time_steps=6
+time_steps=15
 tau=0.1
 
 # Initialize F, S matrices
@@ -102,7 +133,7 @@ S_mat = np.zeros((time_steps, time_steps), dtype=complex)
 # Create a unitary by exponentiating the Hamiltonian
 # Using the scipy sparse matrix form
 ham_mat = hamiltonian.to_matrix()
-Hsp = get_scipy_csc_from_op(ham_mat, -1.0j)
+Hsp = get_scipy_csc_from_op(ham_mat)
 
 '''
 # Create a Hartree-Fock state
@@ -113,24 +144,10 @@ job_result = job.result()
 init_statevector = np.asarray(job_result.get_statevector(init_state)._data, dtype=complex)
 '''
 
-# Create a LAS wave function and initialize
-# PySCF RHF for LAS
-mol = gto.M (atom = xyz, basis = 'sto-3g', output='h6_sto3g.log',
-             symmetry=False)
-
-# Do RHF
-mf = scf.RHF(mol).run()
-las = LASSCF(mf, (2,2,2),(2,2,2), spin_sub=(1,1,1))
-frag_atom_list = ((0,1),(2,3),(4,5))
-loc_mo_coeff = las.localize_init_guess(frag_atom_list, mf.mo_coeff)
-las.kernel(loc_mo_coeff)
-print("LASSCF energy: ", las.e_tot)
-
 qr1 = QuantumRegister(np.sum(las.ncas_sub)*2, 'q1')
 new_circuit = QuantumCircuit(qr1)
-new_circuit.initialize(get_so_ci_vec(las.ci[0][0],2*las.ncas_sub[0],las.nelecas_sub[0]), [0,1,6,7])
-new_circuit.initialize(get_so_ci_vec(las.ci[1][0],2*las.ncas_sub[1],las.nelecas_sub[1]), [2,3,8,9])
-new_circuit.initialize(get_so_ci_vec(las.ci[2][0],2*las.ncas_sub[2],las.nelecas_sub[2]), [4,5,10,11])
+new_circuit.initialize(get_so_ci_vec(las.ci[0][0],2*las.ncas_sub[0],las.nelecas_sub[0]), [0,1,4,5])
+new_circuit.initialize(get_so_ci_vec(las.ci[1][0],2*las.ncas_sub[1],las.nelecas_sub[1]), [2,3,6,7])
 
 backend = Aer.get_backend('statevector_simulator')
 job = execute(new_circuit, backend=backend, shots=1, memory=True)
@@ -162,7 +179,7 @@ for m in range(time_steps):
         # < \phi_0 | U_m^+ U_n | \phi_0 >
         Smat_el = np.vdot(omega_list[m], omega_list[n])
 
-        print("S_{}_{} = {}".format(m, n, Smat_el))
+        #print("S_{}_{} = {}".format(m, n, Smat_el))
         S_mat[m][n] = Smat_el
         S_mat[n][m] = np.conj(Smat_el)
 
@@ -170,22 +187,38 @@ for m in range(time_steps):
     # < \phi_0 | U_m^+ V U_n | \phi_0 >
     for n in range(m+1):
         Fmat_el = np.vdot(omega_list[m], Homega_list[n])
-        print("F_{}_{} = {}".format(m, n, Fmat_el))
+        #print("F_{}_{} = {}".format(m, n, Fmat_el))
         F_mat[m][n] = Fmat_el
         F_mat[n][m] = np.conj(Fmat_el)
-print(S_mat)
+    #print(S_mat)
 
-# Using the generalized Schur decomposition of F, S
-# to obtain the eigvals via scipy.linalg.ordqz (ordered QZ)
-AA, BB, alpha, beta, Q, Z = LA.ordqz(F_mat, S_mat, sort='lhp')
-#AA, BB, Q, Z = LA.qz(F_mat, S_mat)
+    # Using an SVD to condition the F matrix
+    # Before doing the eigendecomposition
+    Stol=1e-12
+    U, s, Vh = LA.svd(S_mat[:m+1, :m+1])
 
-alpha = np.diag(AA)
-beta = np.diag(BB)
-print("Alpha: ",alpha)
-print("Beta: ",beta)
-eigvals = alpha/beta
-print("eigvals = ", np.sort(eigvals))
-print("QKSD energy = ", eigvals[0]+nuc_rep_en)
+    #print(np.allclose(U, Vh.T.conj()))
+    Dtemp = 1/np.sqrt(s)
+    Dtemp[Dtemp**2 > 1/Stol] = 0
 
-print("Error for timesteps={}: {}".format(time_steps, eigvals[0]-np_en))
+    Xp = U[0:len(s),0:len(Dtemp)]*Dtemp
+    Fp = Xp.T.conjugate() @ F_mat[:m+1,:m+1] @ Xp
+
+    # Eigenvalues of the conditioned matrix
+    eigvals, eigvecs = LA.eig(Fp)
+    '''
+    # Using the generalized Schur decomposition of F, S
+    # to obtain the eigvals via scipy.linalg.ordqz (ordered QZ)
+    AA, BB, alpha, beta, Q, Z = LA.ordqz(F_mat, S_mat, sort='lhp')
+    #AA, BB, Q, Z = LA.qz(F_mat, S_mat)
+
+    alpha = np.diag(AA)
+    beta = np.diag(BB)
+    #print("Alpha: ",alpha)
+    #print("Beta: ",beta)
+    eigvals = alpha/beta
+    '''
+    #print("eigvals = ", np.sort(eigvals))
+    print("QKSD energy = ", eigvals[0]+nuc_rep_en)
+
+    print("Error for timestep={}: {}".format(m+1, eigvals[0]-np_en))
