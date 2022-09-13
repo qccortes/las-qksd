@@ -5,7 +5,12 @@
 import numpy as np
 import scipy.linalg as LA
 from scipy.sparse.linalg import expm_multiply
-from scipy.sparse import csc_matrix
+from scipy.sparse import csc_matrix, save_npz, load_npz, linalg
+
+from argparse import ArgumentParser
+
+# PySCF imports
+from pyscf import gto, lib, scf, mcscf, ao2mo
 
 # Qiskit imports
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
@@ -13,7 +18,7 @@ from qiskit_nature.drivers import UnitsType
 from qiskit_nature.converters.second_quantization import QubitConverter
 from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper
 from qiskit_nature.circuit.library.initial_states import HartreeFock
-from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy
+from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy, ElectronicStructureDriverResult
 from qiskit.algorithms import NumPyEigensolver
 from qiskit.opflow import PauliTrotterEvolution, MatrixEvolution
 from qiskit.opflow.state_fns import CircuitStateFn, StateFn
@@ -28,6 +33,16 @@ def get_scipy_csc_from_op(Hop):
 def apply_time_evolution_op(statevector, Hcsc, dt, nstates):
     return expm_multiply(-1j*Hcsc*dt, statevector, start=0.0, stop=nstates-1, num=nstates)
     
+# The number of timesteps and step size
+# as arguments
+parser = ArgumentParser(description='Do a QKSD (KDM H) using matrix forms.')
+parser.add_argument('--steps', type=int, default=5, help='Number of time steps for the Krylov subspace')
+parser.add_argument('--tau', type=float, default=0.1, help='Step size of the time steps')
+args = parser.parse_args()
+
+time_steps=args.steps
+tau=args.tau
+
 xyz = '''H 0.0 0.0 0.0
          H  0.0 0.0 0.5
          H  0.0 0.0 1.5
@@ -37,47 +52,71 @@ xyz = '''H 0.0 0.0 0.0
 #         H 0.0 0.0 1.0
 #         H 0.0 0.0 1.5'''
 
-# First, perform an RHF calculation using the qiskit_nature PySCF driver
-#driver = PySCFDriver(atom=xyz, unit=UnitsType.BOHR, basis='sto-3g', charge=0, spin=0, method=MethodType.RHF)
-driver = PySCFDriver(atom=xyz, basis='sto-3g', charge=0, spin=0, method=MethodType.RHF)
-driver_result = driver.run()
-electronic_en = driver_result.get_property(ElectronicEnergy)
-hf_en = electronic_en.reference_energy
+# Perform an RHF calculation using PySCF
+mol = gto.M (atom = xyz, basis = 'sto-3g', output='h4_sto3g.log', charge=0, spin=0,
+             symmetry=False, verbose=lib.logger.DEBUG)
+mf = scf.RHF(mol).newton()
+hf_en = mf.kernel()
 print("HF energy: ",hf_en)
-nuc_rep_en = electronic_en.nuclear_repulsion_energy
+nuc_rep_en = mf.energy_nuc()
 
-# Save number of orbitals, alpha and beta electrons from driver result
-part_num = driver_result.get_property(ParticleNumber)
-n_so = part_num.num_spin_orbitals
-n_alpha = part_num.num_alpha
-n_beta = part_num.num_beta
+# Set up CASCI for active orbitals
+mc = mcscf.CASCI(mf,6,(6,0))
+n_so = 2*mc.ncas
+(n_alpha, n_beta) = (mc.nelecas[0], mc.nelecas[1])
 
 # Extract and convert the 1 and 2e integrals
 # To obtain the qubit Hamiltonian
-second_q_ops = driver_result.second_q_ops()
-qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
-qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
-hamiltonian = qubit_ops[0]
-#print(hamiltonian)
+h1, e_core = mc.h1e_for_cas()
+print("Core energy:",e_core)
+h2 = ao2mo.restore(1, mc.get_h2eff(), mc.ncas)
 
-# Numpy solver to estimate error
-np_solver = NumPyEigensolver(k=1)
-ed_result = np_solver.compute_eigenvalues(hamiltonian)
-np_en = ed_result.eigenvalues
-print("NumPy result: ", np_en+nuc_rep_en)
-#numpy_wfn = ed_result.eigenstates
+# Check if hsp.npy exists:
+try:
+    Hsp = load_npz("h4_hsp.npz")
+    print("Successfully loaded Hamiltonian.")
+    # Diagonalization for reference
+    eigvals, eigvecs = linalg.eigs(Hsp, k=1)
+    print("Exact diagonalization result: ", eigvals)
+except:
+    # If not stored, create a qubit Hamiltonian
+    particle_number = ParticleNumber(
+        num_spin_orbitals=n_so,
+        num_particles=(n_alpha, n_beta),
+    )
 
-# Set up the number of timesteps and step size
-time_steps=15
-tau=0.1
+    # Assuming an RHF reference for now, so h1_b, h2_ab, h2_bb are created using
+    # the corresponding spots from h1_frag and just the aa term from h2_frag
+    electronic_energy = ElectronicEnergy.from_raw_integrals(
+            # Using MO basis here for simplified conversion
+            ElectronicBasis.MO, h1, h2)
 
-# Create a unitary by exponentiating the Hamiltonian
-# Using the scipy sparse matrix form
-ham_mat = hamiltonian.to_matrix()
-Hsp = get_scipy_csc_from_op(ham_mat)
-#print("Hsp: \n",Hsp)
+    driver_result = ElectronicStructureDriverResult()
+    driver_result.add_property(electronic_energy)
+    driver_result.add_property(particle_number)
+
+    second_q_ops = driver_result.second_q_ops()
+    qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
+    qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
+    hamiltonian = qubit_ops[0]
+    #print(hamiltonian)
+
+    # Numpy solver to estimate error
+    np_solver = NumPyEigensolver(k=1)
+    ed_result = np_solver.compute_eigenvalues(hamiltonian)
+    np_en = ed_result.eigenvalues
+    print("NumPy result: ", np_en)
+    #numpy_wfn = ed_result.eigenstates
+
+    # Create a unitary by exponentiating the Hamiltonian
+    # Using the scipy sparse matrix form
+    ham_mat = hamiltonian.to_matrix()
+    Hsp = get_scipy_csc_from_op(ham_mat)
+    save_npz("h4_hsp.npz", Hsp)
+    #print("Hsp: \n",Hsp)
 
 # Create a Hartree-Fock state
+qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
 init_state = HartreeFock(n_so, (n_alpha, n_beta), qubit_converter)
 backend = Aer.get_backend('statevector_simulator')
 job = execute(init_state, backend=backend, shots=1, memory=True)
@@ -101,7 +140,7 @@ statevector = apply_time_evolution_op(init_statevector, Hsp, tau, time_steps)
 omega_list = [np.asarray(state, dtype=complex) for state in statevector]
 
 # V U |\phi_0>
-Homega_list = [np.dot(ham_mat, omega) for omega in omega_list]
+Homega_list = [Hsp.dot(omega) for omega in omega_list]
 
 # Initialize F, S matrices
 F_mat = np.zeros((time_steps, time_steps), dtype=complex)
@@ -156,6 +195,6 @@ for m in range(time_steps):
     eigvals = alpha/beta
     '''
     #print("eigvals = ", np.sort(eigvals))
-    print("QKSD energy = ", eigvals[0]+nuc_rep_en)
+    print("QKSD energy = ", eigvals[0])
 
     #print("Error for timesteps={}: {}".format(m+1, eigvals[0]-np_en))
