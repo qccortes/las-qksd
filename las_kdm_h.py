@@ -126,7 +126,7 @@ n_beta = mc.nelecas[1]
 
 # Check if hsp.npy exists:
 try:
-    Hsp = load_npz("cr2_hsp_las.npz")
+    Hsp = load_npz("h4_hsp_las.npz")
     print("Successfully loaded Hamiltonian.")
     # Diagonalization for reference
     eigvals, eigvecs = linalg.eigs(Hsp, k=1)
@@ -168,7 +168,7 @@ except:
     # Using the scipy sparse matrix form
     ham_mat = hamiltonian.to_matrix()
     Hsp = get_scipy_csc_from_op(ham_mat)
-    save_npz("cr2_hsp_las.npz", Hsp)
+    save_npz("h4_hsp_las.npz", Hsp)
 
 '''
 # Create a Hartree-Fock state
