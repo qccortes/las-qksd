@@ -13,6 +13,7 @@ from argparse import ArgumentParser
 from pyscf import gto, lib, scf, mcscf, ao2mo
 
 # Qiskit imports
+from qiskit_nature.properties.second_quantization.electronic.bases import ElectronicBasis
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
 from qiskit_nature.drivers import UnitsType
 from qiskit_nature.converters.second_quantization import QubitConverter
@@ -61,7 +62,7 @@ print("HF energy: ",hf_en)
 nuc_rep_en = mf.energy_nuc()
 
 # Set up CASCI for active orbitals
-mc = mcscf.CASCI(mf,6,(6,0))
+mc = mcscf.CASCI(mf,4,(2,2))
 n_so = 2*mc.ncas
 (n_alpha, n_beta) = (mc.nelecas[0], mc.nelecas[1])
 
@@ -146,6 +147,7 @@ Homega_list = [Hsp.dot(omega) for omega in omega_list]
 F_mat = np.zeros((time_steps, time_steps), dtype=complex)
 S_mat = np.zeros((time_steps, time_steps), dtype=complex)
 
+en_list = []
 for m in range(time_steps):
     # Filling the S matrix
     for n in range(m+1):
@@ -196,5 +198,7 @@ for m in range(time_steps):
     '''
     #print("eigvals = ", np.sort(eigvals))
     print("QKSD energy = ", eigvals[0])
+    en_list.append(np.real(eigvals[0]))
 
     #print("Error for timesteps={}: {}".format(m+1, eigvals[0]-np_en))
+print([x+nuc_rep_en for x in en_list])
