@@ -61,6 +61,7 @@ def get_so_ci_vec(ci_vec, nsporbs,nelec):
     for ii in range (2**norbs):
         if f"{ii:0{norbs}b}".count('1') == nelec[1]:
             lookup_b[f"{ii:0{norbs}b}"] = cnt
+            cnt +=1
     # This is just indexing the hilber space from 0,1,...,mCn
     #print (lookup)
 
