@@ -12,10 +12,10 @@ from argparse import ArgumentParser
 # Qiskit imports
 from qiskit_nature.properties.second_quantization.electronic.bases import ElectronicBasis
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
-from qiskit_nature.converters.second_quantization import QubitConverter
-from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper
-from qiskit_nature.circuit.library.initial_states import HartreeFock
-from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy, ElectronicStructureDriverResult
+from qiskit_nature.second_q.mappers import JordanWignerMapper, QubitConverter
+from qiskit_nature.second_q.circuit.library.initial_states import HartreeFock
+from qiskit_nature.second_q.hamiltonians import ElectronicEnergy
+from qiskit_nature.second_q.problems import ElectronicStructureProblem
 from qiskit.algorithms import NumPyEigensolver
 from qiskit.opflow import PauliTrotterEvolution, MatrixEvolution
 from qiskit.opflow.state_fns import CircuitStateFn, StateFn
@@ -137,25 +137,13 @@ except:
     # If not stored, create a qubit Hamiltonian
     # To obtain the qubit Hamiltonian
 
-    particle_number = ParticleNumber(
-        num_spin_orbitals=n_so,
-        num_particles=(n_alpha, n_beta),
-    )
-
     # Assuming an RHF reference for now, so h1_b, h2_ab, h2_bb are created using
     # the corresponding spots from h1_frag and just the aa term from h2_frag
-    electronic_energy = ElectronicEnergy.from_raw_integrals(
-            # Using MO basis here for simplified conversion
-            ElectronicBasis.MO, h1, h2)
+    electronic_energy = ElectronicEnergy.from_raw_integrals(h1_frag[frag], h2_frag[frag])
+    second_q_op = electronic_energy.second_q_op()
 
-    driver_result = ElectronicStructureDriverResult()
-    driver_result.add_property(electronic_energy)
-    driver_result.add_property(particle_number)
-
-    second_q_ops = driver_result.second_q_ops()
     qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
-    qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
-    hamiltonian = qubit_ops[0]
+    hamiltonian = qubit_converter.convert(second_q_op)
     #print(hamiltonian)
 
     # Numpy solver to estimate error
@@ -163,7 +151,7 @@ except:
     ed_result = np_solver.compute_eigenvalues(hamiltonian)
     np_en = ed_result.eigenvalues
     print("NumPy result: ", np_en)
-    #numpy_wfn = ed_result.eigenstates
+    numpy_wfn = ed_result.eigenstates
 
     # Create a unitary by exponentiating the Hamiltonian
     # Using the scipy sparse matrix form
@@ -189,6 +177,9 @@ backend = Aer.get_backend('statevector_simulator')
 job = execute(new_circuit, backend=backend, shots=1, memory=True)
 job_result = job.result()
 init_statevector = np.asarray(job_result.get_statevector(new_circuit)._data, dtype=complex)
+
+overlap = numpy_wfn[0].primitive.inner(init_statevector)
+print("Overlap of numpy wavefn and LAS wavefn: ", np.abs(overlap))
 
 '''
 # Alternative way to obtain the HF statevector

@@ -13,10 +13,10 @@ from argparse import ArgumentParser
 # Qiskit imports
 from qiskit_nature.properties.second_quantization.electronic.bases import ElectronicBasis
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
-from qiskit_nature.converters.second_quantization import QubitConverter
-from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper
-from qiskit_nature.circuit.library.initial_states import HartreeFock
-from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy, ElectronicStructureDriverResult
+from qiskit_nature.second_q.mappers import JordanWignerMapper, QubitConverter
+from qiskit_nature.second_q.circuit.library.initial_states import HartreeFock
+from qiskit_nature.second_q.hamiltonians import ElectronicEnergy
+from qiskit_nature.second_q.problems import ElectronicStructureProblem
 from qiskit.algorithms import NumPyEigensolver
 from qiskit.opflow import PauliTrotterEvolution, MatrixEvolution
 from qiskit.opflow.state_fns import CircuitStateFn, StateFn
@@ -82,7 +82,7 @@ nelecas_sub = las.nelecas_sub
 ## Use QKSD together with the LAS fragment Hamiltonians
 ## to give better fragment wavefunctions
 
-h1_las = las.h1e_for_cas()
+h1_las = las.h1e_for_cas(loc_mo_coeff)
 eri_las = las.get_h2eff(loc_mo_coeff)
 
 # Storing each fragment's h1 and h2 as a list
@@ -107,36 +107,23 @@ for frag in range(len(ncas_sub)):
     n_alpha = nelecas_sub[frag][0]
     n_beta = nelecas_sub[frag][1]
 
-    particle_number = ParticleNumber(
-        num_spin_orbitals=n_so,
-        num_particles=(n_alpha, n_beta),
-    )
-    electronic_energy = ElectronicEnergy.from_raw_integrals(
-            # Using MO basis here for simplified conversion
-            ElectronicBasis.MO, h1_frag[frag], h2_frag[frag]
-    )
-    driver_result = ElectronicStructureDriverResult()
-    driver_result.add_property(electronic_energy)
-    driver_result.add_property(particle_number)
-
-    second_q_ops = driver_result.second_q_ops()
-
-    # Choose fermion-to-qubit mapping
+    electronic_energy = ElectronicEnergy.from_raw_integrals(h1_frag[frag], h2_frag[frag])
+    second_q_op = electronic_energy.second_q_op()
+    #print(second_q_op)
     qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
-    # This just outputs a qubit op corresponding to a 2nd quantized op
-    qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
-    hamiltonian = qubit_ops[0]
+    ham_frag = qubit_converter.convert(second_q_op)
+    #print(hamiltonian)
 
     # Numpy solver to estimate error
     np_solver = NumPyEigensolver(k=1)
-    ed_result = np_solver.compute_eigenvalues(hamiltonian)
+    ed_result = np_solver.compute_eigenvalues(ham_frag)
     np_en = ed_result.eigenvalues
     print("NumPy result: ", np_en)
     #numpy_wfn = ed_result.eigenstates
 
     # Create a unitary by exponentiating the Hamiltonian
     # Using the scipy sparse matrix form
-    ham_mat = hamiltonian.to_matrix()
+    ham_mat = ham_frag.to_matrix()
     Hsp = get_scipy_csc_from_op(ham_mat)
     save_npz(f"h4_hsp_frag_{frag}.npz", Hsp)
 
@@ -246,20 +233,11 @@ except:
         num_particles=(n_alpha, n_beta),
     )
 
-    # Assuming an RHF reference for now, so h1_b, h2_ab, h2_bb are created using
-    # the corresponding spots from h1_frag and just the aa term from h2_frag
-    electronic_energy = ElectronicEnergy.from_raw_integrals(
-            # Using MO basis here for simplified conversion
-            ElectronicBasis.MO, h1, h2)
+    electronic_energy = ElectronicEnergy.from_raw_integrals(h1, h2)
 
-    driver_result = ElectronicStructureDriverResult()
-    driver_result.add_property(electronic_energy)
-    driver_result.add_property(particle_number)
-
-    second_q_ops = driver_result.second_q_ops()
+    second_q_op = electronic_energy.second_q_op()
     qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
-    qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
-    hamiltonian = qubit_ops[0]
+    hamiltonian = qubit_converter.convert(second_q_op)
     #print(hamiltonian)
 
     # Numpy solver to estimate error

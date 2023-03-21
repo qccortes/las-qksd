@@ -15,11 +15,11 @@ from pyscf import gto, lib, scf, mcscf, ao2mo
 # Qiskit imports
 from qiskit_nature.properties.second_quantization.electronic.bases import ElectronicBasis
 from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
-from qiskit_nature.drivers import UnitsType
-from qiskit_nature.converters.second_quantization import QubitConverter
-from qiskit_nature.mappers.second_quantization import JordanWignerMapper, ParityMapper
-from qiskit_nature.circuit.library.initial_states import HartreeFock
-from qiskit_nature.properties.second_quantization.electronic import ParticleNumber, ElectronicEnergy, ElectronicStructureDriverResult
+from qiskit_nature.drivers.second_quantization import PySCFDriver, MethodType
+from qiskit_nature.second_q.mappers import JordanWignerMapper, QubitConverter
+from qiskit_nature.second_q.circuit.library.initial_states import HartreeFock
+from qiskit_nature.second_q.hamiltonians import ElectronicEnergy
+from qiskit_nature.second_q.problems import ElectronicStructureProblem
 from qiskit.algorithms import NumPyEigensolver
 from qiskit.opflow import PauliTrotterEvolution, MatrixEvolution
 from qiskit.opflow.state_fns import CircuitStateFn, StateFn
@@ -63,7 +63,7 @@ nuc_rep_en = mf.energy_nuc()
 
 # Set up CASCI for active orbitals
 mc = mcscf.CASCI(mf,4,(2,2))
-n_so = 2*mc.ncas
+n_so = mc.ncas
 (n_alpha, n_beta) = (mc.nelecas[0], mc.nelecas[1])
 
 # Extract and convert the 1 and 2e integrals
@@ -81,25 +81,14 @@ try:
     print("Exact diagonalization result: ", eigvals)
 except:
     # If not stored, create a qubit Hamiltonian
-    particle_number = ParticleNumber(
-        num_spin_orbitals=n_so,
-        num_particles=(n_alpha, n_beta),
-    )
 
     # Assuming an RHF reference for now, so h1_b, h2_ab, h2_bb are created using
     # the corresponding spots from h1_frag and just the aa term from h2_frag
-    electronic_energy = ElectronicEnergy.from_raw_integrals(
-            # Using MO basis here for simplified conversion
-            ElectronicBasis.MO, h1, h2)
+    electronic_energy = ElectronicEnergy.from_raw_integrals(h1, h2)
+    second_q_op = electronic_energy.second_q_op()
 
-    driver_result = ElectronicStructureDriverResult()
-    driver_result.add_property(electronic_energy)
-    driver_result.add_property(particle_number)
-
-    second_q_ops = driver_result.second_q_ops()
     qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
-    qubit_ops = [qubit_converter.convert(op) for op in second_q_ops]
-    hamiltonian = qubit_ops[0]
+    hamiltonian = qubit_converter.convert(second_q_op)
     #print(hamiltonian)
 
     # Numpy solver to estimate error
@@ -107,7 +96,7 @@ except:
     ed_result = np_solver.compute_eigenvalues(hamiltonian)
     np_en = ed_result.eigenvalues
     print("NumPy result: ", np_en)
-    #numpy_wfn = ed_result.eigenstates
+    numpy_wfn = ed_result.eigenstates
 
     # Create a unitary by exponentiating the Hamiltonian
     # Using the scipy sparse matrix form

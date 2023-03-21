@@ -134,8 +134,20 @@ for frag in range(len(ncas_sub)):
     qubit_converter = QubitConverter(mapper = JordanWignerMapper(), two_qubit_reduction=False)
     ham_frag = qubit_converter.convert(second_q_op)
     #print(hamiltonian)
+
+    # Numpy solver to estimate error
+    np_solver = NumPyEigensolver(k=1)
+    ed_result = np_solver.compute_eigenvalues(ham_frag)
+    np_en = ed_result.eigenvalues
+    print("NumPy result: ", np_en)
+    #numpy_wfn = ed_result.eigenstates
+
     ham_mat = ham_frag.to_matrix()
-    Hsp = get_scipy_csc_from_op(ham_mat)
+    print(np.diagonal(ham_mat))
+    new_ham_mat = ham_mat.copy()
+    np.fill_diagonal(new_ham_mat, np.diagonal(ham_mat)-e_states)
+    print(np.diagonal(new_ham_mat))
+    Hsp = get_scipy_csc_from_op(new_ham_mat)
     save_npz(f"h4_hsp_frag{frag}.npz", Hsp)
 
     # Create a Hartree-Fock state |HF>
@@ -150,16 +162,6 @@ for frag in range(len(ncas_sub)):
     statevector = apply_time_evolution_op(init_statevector, Hsp, ftau, ftime_steps)
     omega_list = [np.asarray(state, dtype=complex) for state in statevector]
     frag_omega_list.append(omega_list)
-
-## Block to test if the np.eig of the fragment Hamiltonians
-## gives the same answer as the subspace CI energies
-#    # Numpy solver to estimate error
-#    np_solver = NumPyEigensolver(k=1)
-#    ed_result = np_solver.compute_eigenvalues(hamiltonian)
-#    np_en = ed_result.eigenvalues
-#    print("NumPy result: ", np_en)
-#    #numpy_wfn = ed_result.eigenstates
-#exit()
 
 # Extract and convert the 1 and 2e integrals
 mc = mcscf.CASCI(mf,4,4)
